@@ -1,0 +1,15 @@
+[Unit]
+Description=Vinted Optiplex Price Monitor Daemon
+After=network.target mariadb.service
+
+[Service]
+Type=simple
+User=jorge
+WorkingDirectory=/home/jorge/vinted
+EnvironmentFile=/home/jorge/vinted/.env
+ExecStart=/home/jorge/vinted/venv/bin/python3 -u /home/jorge/vinted/vinted_monitor.py --topic vinted_optiplex_jorge
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

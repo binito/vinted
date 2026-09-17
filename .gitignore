@@ -1,0 +1,9 @@
+.aider*
+._*
+venv/
+__pycache__/
+*.log
+seen_items.json
+.daily_report_state.json
+.vinted_cookies.jar
+.env
