@@ -5,13 +5,14 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
-from vinted_monitor import ler_alvos, atualizar_preco_alvo, remover_alvo
+from vinted_monitor import ler_alvos, adicionar_alvo, atualizar_preco_alvo, remover_alvo
 
 
 def page_html(message="", is_error=False):
     ok, targets_or_error = ler_alvos()
-    if not ok:
+    if not ok and "não contém nenhum alvo ativo" not in str(targets_or_error):
         return f"<h1>Erro de configuração</h1><p>{escape(str(targets_or_error))}</p>"
+    targets_or_error = [] if not ok else targets_or_error
 
     cards = []
     for term, ceiling, _rule in targets_or_error:
@@ -48,10 +49,10 @@ h1{{font-size:clamp(2.15rem,9vw,3.5rem);letter-spacing:-.075em;line-height:.95;m
 .grid{{display:grid;gap:.85rem}} .target-card{{position:relative;overflow:hidden;padding:1.2rem;border:1px solid #ffffff14;border-radius:1.35rem;background:linear-gradient(135deg,#171a2cdd,#101220dd);box-shadow:0 15px 35px #0000002e}}
 .target-card:before{{content:"";position:absolute;top:0;left:0;width:100%;height:2px;background:linear-gradient(90deg,#8b5cf6,#00d7b4);opacity:.8}} .target-top{{display:flex;justify-content:space-between;gap:1rem;align-items:flex-start}}
 .eyebrow{{color:#8490b6;font-size:.64rem;letter-spacing:.13em;font-weight:800}} h2{{margin:.35rem 0 1.3rem;font-size:1.16rem;letter-spacing:-.025em;overflow-wrap:anywhere}} .pulse{{margin-top:.25rem;width:.7rem;height:.7rem;border-radius:50%;background:#4ff3c9;box-shadow:0 0 0 .3rem #4ff3c922,0 0 15px #4ff3c9}}
-.price-form label{{display:block;color:#aeb6cf;font-size:.76rem;font-weight:750;margin-bottom:.45rem}} .price-control{{display:flex;align-items:center;gap:.35rem;padding:.28rem .3rem .28rem .85rem;border:1px solid #ffffff1c;border-radius:.9rem;background:#07091399;color:#55f2ca;font-size:1.15rem;font-weight:800}} input{{min-width:0;flex:1;border:0;outline:0;background:transparent;color:white;font:800 1.35rem/1 Inter,system-ui}} button{{border:0;border-radius:.68rem;padding:.72rem .86rem;background:linear-gradient(135deg,#7c4dff,#9a63ff);color:white;font:750 .82rem Inter,system-ui;cursor:pointer;box-shadow:0 6px 16px #6939df4a}} button:active{{transform:scale(.97)}} .remove{{margin-top:.8rem;padding:0;background:none;box-shadow:none;color:#ff99a6;font-size:.75rem}}
+.add-card{{margin-bottom:1.1rem;padding:1.2rem;border:1px solid #55f2ca3d;border-radius:1.35rem;background:linear-gradient(135deg,#122a2ddd,#101220dd);box-shadow:0 15px 35px #0000002e}} .add-card h2{{margin-bottom:.35rem}} .add-card p{{margin:.1rem 0 1rem;color:#a8afc7;font-size:.82rem}} .add-grid{{display:grid;gap:.7rem}} label{{display:block;color:#aeb6cf;font-size:.76rem;font-weight:750;margin-bottom:.35rem}} input{{min-width:0;width:100%;border:1px solid #ffffff1c;border-radius:.7rem;outline:0;padding:.75rem .8rem;background:#07091399;color:white;font:600 .95rem Inter,system-ui}} .add-grid button{{margin-top:.2rem;width:100%}} .price-form label{{display:block;color:#aeb6cf;font-size:.76rem;font-weight:750;margin-bottom:.45rem}} .price-control{{display:flex;align-items:center;gap:.35rem;padding:.28rem .3rem .28rem .85rem;border:1px solid #ffffff1c;border-radius:.9rem;background:#07091399;color:#55f2ca;font-size:1.15rem;font-weight:800}} .price-control input{{border:0;border-radius:0;padding:.2rem 0;font:800 1.35rem/1 Inter,system-ui}} button{{border:0;border-radius:.68rem;padding:.72rem .86rem;background:linear-gradient(135deg,#7c4dff,#9a63ff);color:white;font:750 .82rem Inter,system-ui;cursor:pointer;box-shadow:0 6px 16px #6939df4a}} button:active{{transform:scale(.97)}} .remove{{margin-top:.8rem;padding:0;background:none;box-shadow:none;color:#ff99a6;font-size:.75rem}}
 .footer{{margin:1.8rem .2rem 0;color:#727c9b;font-size:.76rem;text-align:center}} @media (min-width:600px){{.shell{{padding-left:1.5rem;padding-right:1.5rem}}.grid{{grid-template-columns:repeat(2,1fr)}}}}
 </style>
-<main class="shell"><header class="hero"><div class="brand"><span class="brand-mark">⌁</span> VINTED RADAR</div><h1>As tuas buscas,<br><em>sob controlo.</em></h1><p class="subtitle">Ajusta limites ou termina uma monitorização. As mudanças entram em vigor até à próxima ronda.</p><span class="stat"><b>{len(targets_or_error)}</b> buscas em vigilância</span></header>{notice}<section class="grid">{''.join(cards)}</section><p class="footer">Monitor Vinted · atualização automática a cada 2 minutos</p></main></html>"""
+<main class="shell"><header class="hero"><div class="brand"><span class="brand-mark">⌁</span> VINTED + WALLAPOP RADAR</div><h1>As tuas buscas,<br><em>sob controlo.</em></h1><p class="subtitle">Adiciona pesquisas, ajusta limites ou termina uma monitorização. As mudanças entram em vigor até à próxima ronda.</p><span class="stat"><b>{len(targets_or_error)}</b> buscas em vigilância</span></header>{notice}<section class="add-card"><h2>Adicionar pesquisa</h2><p>A mesma pesquisa será procurada na Vinted e no Wallapop.</p><form method="post" action="/add" class="add-grid"><div><label for="new-term">Termo de pesquisa</label><input id="new-term" name="term" type="text" placeholder="dell optiplex 3070" required></div><div><label for="new-price">Preço máximo (€)</label><input id="new-price" name="price" type="number" min="1" step="1" placeholder="95" required></div><div><label for="new-rule">Regra do título</label><input id="new-rule" name="rule" type="text" placeholder="optiplex+3070-aio-ecra" required></div><button type="submit">＋ Adicionar pesquisa</button></form></section><section class="grid">{''.join(cards)}</section><p class="footer">Monitor Vinted + Wallapop · atualização automática a cada 2 minutos</p></main></html>"""
 
 
 class ConfigHandler(BaseHTTPRequestHandler):
@@ -73,7 +74,15 @@ class ConfigHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         data = parse_qs(self.rfile.read(length).decode("utf-8"))
         term = data.get("term", [""])[0].strip()
-        if self.path == "/price":
+        if self.path == "/add":
+            try:
+                price = float(data.get("price", [""])[0])
+            except ValueError:
+                self.send_page("Indique um preço positivo.", True)
+                return
+            rule = data.get("rule", [""])[0].strip()
+            ok, message = adicionar_alvo(term, price, rule)
+        elif self.path == "/price":
             try:
                 price = float(data.get("price", [""])[0])
                 if price <= 0:

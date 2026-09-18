@@ -18,6 +18,8 @@ LOG_FILE = os.path.join(BASE_DIR, "vinted_monitor.log")
 JAR_FILE = os.path.join(BASE_DIR, ".vinted_cookies.jar")
 REPORT_STATE_FILE = os.path.join(BASE_DIR, ".daily_report_state.json")
 CONFIG_VIEW_URL = "http://192.168.1.176:8765/"
+WALLAPOP_API_URL = "https://api.wallapop.com/api/v3/search"
+WALLAPOP_SITE_URL = "https://es.wallapop.com"
 
 def registar(mensagem):
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -201,6 +203,43 @@ def atualizar_preco_alvo(termo, novo_preco, config_path=CONF_FILE):
     except Exception as e:
         return False, f"Erro ao atualizar/adicionar configuração: {e}"
 
+def adicionar_alvo(termo, novo_preco, regra_filtro, config_path=CONF_FILE):
+    """Adiciona uma nova pesquisa sem alterar as pesquisas existentes."""
+    termo_clean = (termo or "").strip().lower()
+    regra_clean = (regra_filtro or "").strip()
+
+    if not termo_clean:
+        return False, "Indique um termo de pesquisa."
+    if not regra_clean:
+        return False, "Indique uma regra de título."
+    if "|" in termo_clean or "|" in regra_clean or "\n" in termo_clean or "\n" in regra_clean:
+        return False, "O termo e a regra não podem conter '| ' ou mudanças de linha."
+    try:
+        preco = float(novo_preco)
+        if preco <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return False, "Indique um preço positivo."
+
+    if not os.path.exists(config_path):
+        return False, f"Ficheiro de configuração não existe: {config_path}"
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            for linha in f:
+                linha_limpa = linha.split("#", 1)[0].strip()
+                if not linha_limpa:
+                    continue
+                partes = [x.strip() for x in linha_limpa.split("|")]
+                if len(partes) == 3 and partes[0].lower() == termo_clean:
+                    return False, f"A pesquisa '{termo_clean}' já existe."
+
+        with open(config_path, "a", encoding="utf-8") as f:
+            f.write(f"\n{termo_clean} | {preco:.0f} | {regra_clean}\n")
+        return True, f"Nova pesquisa '{termo_clean}' adicionada com sucesso (Tecto: {preco:.0f}€)."
+    except Exception as e:
+        return False, f"Erro ao adicionar pesquisa: {e}"
+
 def remover_alvo(termo, config_path=CONF_FILE):
     """
     Remove um termo do ficheiro de configuração vigiar-vinted.conf.
@@ -272,7 +311,7 @@ def enviar_relatorio_diario(ntfy_topic, ntfy_server="https://ntfy.sh"):
     alvos = alvos_ou_erro
     data_hoje = time.strftime("%d/%m/%Y")
     
-    linhas_msg = [f"📊 Relatório Diário Vinted - {data_hoje}\n"]
+    linhas_msg = [f"📊 Relatório Diário Vinted + Wallapop - {data_hoje}\n"]
     linhas_msg.append("Alvos ativos & Preços Máximos atuais:")
     for termo, tecto, _ in alvos:
         linhas_msg.append(f"• {termo.title()}: max {tecto:.0f}€")
@@ -286,7 +325,7 @@ def enviar_relatorio_diario(ntfy_topic, ntfy_server="https://ntfy.sh"):
     ]
     
     headers = {
-        "Title": "Resumo Diario: Configuracao de Pesquisas Vinted",
+        "Title": "Resumo Diario: Configuracao de Pesquisas Vinted + Wallapop",
         "Tags": "calendar,chart_with_upwards_trend,gear",
         "Actions": "; ".join(actions)
     }
@@ -306,7 +345,7 @@ def enviar_relatorio_diario(ntfy_topic, ntfy_server="https://ntfy.sh"):
 def send_ntfy_notification(ntfy_topic, title, message, click_url, ntfy_server="https://ntfy.sh", termo=None):
     url = f"{ntfy_server.rstrip('/')}/{ntfy_topic}"
     headers = {
-        "Title": "Alerta Vinted - Dell Optiplex",
+        "Title": "Alerta Vinted + Wallapop - Dell Optiplex",
         "Tags": "computer,desktop,euro",
     }
     if click_url:
@@ -456,6 +495,68 @@ def scrape_vinted_html(session, search_query):
     except Exception as e:
         return False, f"Exceção no HTML: {e}"
 
+def scrape_wallapop_api(session, search_query):
+    """
+    Pesquisa no endpoint JSON que o site Wallapop usa internamente.
+
+    O Wallapop não publica atualmente uma API de pesquisa para terceiros;
+    este endpoint não é uma API oficial/documentada e pode mudar sem aviso.
+    """
+    params = {
+        "step": 1,
+        "source": "keywords",
+        "limit": 40,
+        "keywords": search_query,
+    }
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "X-DeviceOS": "0",
+        "Origin": WALLAPOP_SITE_URL,
+        "Referer": f"{WALLAPOP_SITE_URL}/",
+    }
+
+    try:
+        resp = session.get(WALLAPOP_API_URL, params=params, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            return False, f"API respondeu com HTTP {resp.status_code}"
+
+        data = resp.json()
+        payload = data.get("data", {}).get("section", {}).get("payload", {})
+        raw_items = payload.get("items")
+        if not isinstance(raw_items, list):
+            return False, "Estrutura JSON da API alterada (campo 'items' em falta)"
+
+        items = []
+        for item in raw_items:
+            item_id = str(item.get("id") or "").strip()
+            title = html.unescape(item.get("title") or "").strip()
+            if not item_id or not title:
+                continue
+
+            price_obj = item.get("price") or {}
+            price_val = parse_price(price_obj.get("amount", 0))
+            web_slug = item.get("web_slug") or item.get("slug")
+            item_url = (
+                f"{WALLAPOP_SITE_URL}/item/{web_slug}"
+                if web_slug else f"{WALLAPOP_SITE_URL}/item/{item_id}"
+            )
+
+            # Prefixo obrigatório: IDs da Vinted e do Wallapop não devem
+            # partilhar a mesma chave no estado de anúncios vistos.
+            items.append({
+                "id": f"wallapop:{item_id}",
+                "title": title,
+                "price": price_val,
+                "total_price": price_val,
+                "url": item_url,
+                "platform": "Wallapop",
+            })
+
+        return True, items
+    except Exception as e:
+        return False, f"Exceção na API Wallapop: {e}"
+
 def processar_mensagens_ntfy(ntfy_topic, ntfy_server="https://ntfy.sh", since_time="10m"):
     """
     Consulta as mensagens recentes enviadas para o tópico do ntfy e processa comandos de ajuste de preço.
@@ -531,7 +632,7 @@ def processar_mensagens_ntfy(ntfy_topic, ntfy_server="https://ntfy.sh", since_ti
         registar(f"[!] Erro ao consultar mensagens ntfy: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Vinted Monitor Avançado v2.1")
+    parser = argparse.ArgumentParser(description="Monitor de anúncios Vinted + Wallapop")
     parser.add_argument("--topic", type=str, required=True, help="Tópico do ntfy")
     parser.add_argument("--server", type=str, default="https://ntfy.sh", help="Servidor ntfy")
     parser.add_argument("--interval", type=int, default=120, help="Intervalo de verificação em segundos")
@@ -540,6 +641,7 @@ def main():
     parser.add_argument("--relatorio", action="store_true", help="Envia o relatório diário de alvos e sai")
     parser.add_argument("--hora-relatorio", default="09:00", help="Hora local do resumo diário (HH:MM; predefinição: 09:00)")
     parser.add_argument("--sem-relatorio-diario", action="store_true", help="Desativa o resumo diário automático")
+    parser.add_argument("--sem-wallapop", action="store_true", help="Desativa a pesquisa adicional no Wallapop")
     parser.add_argument("--set-price", nargs=2, metavar=('TERMO', 'PRECO'), help="Atualiza o preço teto de um termo (ex: --set-price 'dell optiplex 3070' 95)")
 
     args = parser.parse_args()
@@ -569,7 +671,8 @@ def main():
     report_state = load_report_state()
     primeira_execucao = (len(seen_items) == 0)
 
-    registar(f"[*] Monitor Vinted v2.1 iniciado. Tópico ntfy: {args.topic} (Modo Ensaio: {args.ensaio})")
+    mercados = "Vinted" if args.sem_wallapop else "Vinted + Wallapop"
+    registar(f"[*] Monitor {mercados} iniciado. Tópico ntfy: {args.topic} (Modo Ensaio: {args.ensaio})")
 
     session = requests.Session(impersonate="chrome120")
 
@@ -592,13 +695,13 @@ def main():
         alvos = alvos_ou_erro
         registar(f"\n[*] A iniciar verificação de {len(alvos)} alvos...")
         
-        # Obter X-Anon-Id para a API
+        # Obter X-Anon-Id para a API Vinted
         ok_sess, anon_id = get_vinted_session_tokens(session)
         if not ok_sess:
             registar(f"[!] Aaviso: Não foi possível obter X-Anon-Id ({anon_id}). Tentará fallback.")
 
         for termo, tecto_preco, regra_filtro in alvos:
-            # 1. Tentar API Primária
+            # 1. Pesquisar na Vinted pela API primária e fallback HTML.
             via_usada = "API /svc-catalogue"
             ok_read, res_items = scrape_vinted_api(session, termo, anon_id)
 
@@ -608,53 +711,68 @@ def main():
                 via_usada = "HTML /catalog"
                 ok_read, res_items = scrape_vinted_html(session, termo)
 
+            fontes = []
             if not ok_read:
-                registar(f"[CRÍTICO] [{termo}] FALHA TOTAL DE LEITURA (API e HTML falharam): {res_items}")
+                registar(f"[!] [{termo}] Vinted indisponível (API e HTML falharam): {res_items}")
                 try:
                     vinted_db.record_health("ERROR", "vinted", f"{termo}: {res_items}")
                 except Exception:
                     pass
-                continue
+            else:
+                items = res_items
+                registar(f"[*] [{termo}] [Vinted/{via_usada}] Lido com sucesso: {len(items)} anúncios recentes.")
+                fontes.append(("Vinted", items, via_usada))
 
-            items = res_items
-            registar(f"[*] [{termo}] [{via_usada}] Lido com sucesso: {len(items)} anúncios recentes.")
+            # 2. Pesquisar também no Wallapop usando o endpoint JSON do site.
+            if not args.sem_wallapop:
+                ok_wallapop, wallapop_items = scrape_wallapop_api(session, termo)
+                if ok_wallapop:
+                    registar(f"[*] [{termo}] [Wallapop/API JSON] Lido com sucesso: {len(wallapop_items)} anúncios recentes.")
+                    fontes.append(("Wallapop", wallapop_items, "API JSON"))
+                else:
+                    registar(f"[!] [{termo}] Wallapop indisponível: {wallapop_items}")
+                    try:
+                        vinted_db.record_health("ERROR", "wallapop", f"{termo}: {wallapop_items}")
+                    except Exception:
+                        pass
 
-            for item in items:
-                item_id = item['id']
-                # O teto representa o custo final para o comprador, incluindo taxa Vinted.
-                preco_atual = item['total_price']
-                ultimo_preco = seen_items.get(item_id)
+            for plataforma, items, via_fonte in fontes:
+                for item in items:
+                    item_id = item['id']
+                    # O total da Vinted inclui taxa quando a API o fornece;
+                    # no Wallapop o endpoint devolve o preço anunciado.
+                    preco_atual = item['total_price']
+                    ultimo_preco = seen_items.get(item_id)
 
-                # Validar tecto de preço e regras do título
-                if preco_atual <= tecto_preco and casa_filtro_titulo(item['title'], regra_filtro):
-                    
-                    is_novo = (ultimo_preco is None)
-                    is_baixou_preco = (ultimo_preco is not None and preco_atual < ultimo_preco)
+                    # Validar tecto de preço e regras do título
+                    if preco_atual <= tecto_preco and casa_filtro_titulo(item['title'], regra_filtro):
+                        is_novo = (ultimo_preco is None)
+                        is_baixou_preco = (ultimo_preco is not None and preco_atual < ultimo_preco)
 
-                    if (is_novo or is_baixou_preco) and not primeira_execucao:
-                        if is_novo:
-                            title_msg = f"🚨 Novo Anúncio Vinted: {item['title']}"
-                            reason_str = f"Preço: {preco_atual:.2f}€ (Tecto: {tecto_preco:.2f}€)"
-                        else:
-                            title_msg = f"📉 BAIXA DE PREÇO Vinted: {item['title']}"
-                            reason_str = f"Preço Baixou: {ultimo_preco:.2f}€ ➡️ {preco_atual:.2f}€ (Tecto: {tecto_preco:.2f}€)"
+                        if (is_novo or is_baixou_preco) and not primeira_execucao:
+                            if is_novo:
+                                title_msg = f"🚨 Novo Anúncio {plataforma}: {item['title']}"
+                                reason_str = f"Preço: {preco_atual:.2f}€ (Tecto: {tecto_preco:.2f}€)"
+                            else:
+                                title_msg = f"📉 BAIXA DE PREÇO {plataforma}: {item['title']}"
+                                reason_str = f"Preço Baixou: {ultimo_preco:.2f}€ ➡️ {preco_atual:.2f}€ (Tecto: {tecto_preco:.2f}€)"
 
-                        body_msg = f"{reason_str}\nVia: {via_usada}\nLink: {item['url']}"
-                        registar(f"[MATCH] {title_msg} - {preco_atual}€")
+                            body_msg = f"{reason_str}\nVia: {plataforma}/{via_fonte}\nLink: {item['url']}"
+                            registar(f"[MATCH] {title_msg} - {preco_atual}€")
 
-                        if args.ensaio:
-                            registar(f"  [MODO ENSAIO] Notificação omitida. Conteúdo:\n{body_msg}")
-                        else:
-                            send_ntfy_notification(
-                                args.topic, title_msg, body_msg, item['url'], args.server, termo
-                            )
-                        try:
-                            vinted_db.record_alert(item, termo, "new" if is_novo else "price_drop")
-                        except Exception as e:
-                            registar(f"[!] Não foi possível guardar histórico de alerta: {e}")
+                            if args.ensaio:
+                                registar(f"  [MODO ENSAIO] Notificação omitida. Conteúdo:\n{body_msg}")
+                            else:
+                                send_ntfy_notification(
+                                    args.topic, title_msg, body_msg, item['url'], args.server, termo
+                                )
+                            try:
+                                vinted_db.record_alert(item, termo, "new" if is_novo else "price_drop")
+                            except Exception as e:
+                                registar(f"[!] Não foi possível guardar histórico de alerta: {e}")
 
-                    # Só anúncios elegíveis entram no estado; impede marcar ruído como visto.
-                    seen_items[item_id] = preco_atual
+                        # Só anúncios elegíveis entram no estado; impede marcar ruído como visto.
+                        seen_items[item_id] = preco_atual
 
         # Guardar estado apenas se NÃO FOR modo ensaio
         if not args.ensaio:
